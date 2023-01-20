@@ -36,7 +36,7 @@ CONTAINS
                QSNOWXY, QRAINXY,  WSLAKEXY, ZWTXY,  WAXY,  WTXY,    TSNOXY, & ! IN/OUT Noah MP only
 	       ZSNSOXY,  SNICEXY,  SNLIQXY,  LFMASSXY, RTMASSXY,  STMASSXY, & ! IN/OUT Noah MP only
 	        WOODXY, STBLCPXY, FASTCPXY,    XLAIXY,   XSAIXY,   TAUSSXY, & ! IN/OUT Noah MP only
-	       SMOISEQ, SMCWTDXY,DEEPRECHXY,   RECHXY,  GRAINXY,    GDDXY,PGSXY,  & ! IN/OUT Noah MP only
+	       SMOISEQ, SMCWTDXY,DEEPRECHXY,   RECHXY,  GRAINXY,    GDDXY, TAVEXY, PGSXY,  & ! IN/OUT Noah MP only
                GECROS_STATE,                                                & ! IN/OUT gecros model
                QTDRAIN,   TD_FRACTION,                                      & ! IN/OUT tile drainage
 	        T2MVXY,   T2MBXY,    Q2MVXY,   Q2MBXY,                      & ! OUT Noah MP only
@@ -161,6 +161,7 @@ CONTAINS
     REAL,    DIMENSION( ims:ime,          jms:jme ), INTENT(IN   ) ::  SEASON_GDD! growing season GDD
     REAL,    DIMENSION( ims:ime,          jms:jme ), INTENT(INOUT) ::  GRAINXY   ! mass of grain XING [g/m2]
     REAL,    DIMENSION( ims:ime,          jms:jme ), INTENT(INOUT) ::  GDDXY     ! growing degree days XING (based on 10C) 
+    REAL,    DIMENSION( ims:ime,          jms:jme ), INTENT(INOUT) ::  TAVEXY
  INTEGER,    DIMENSION( ims:ime,          jms:jme ), INTENT(INOUT) ::  PGSXY
 
 ! gecros model
@@ -483,6 +484,7 @@ CONTAINS
     REAL                                :: WOOD         ! mass of wood (incl. woody roots) [g/m2]
     REAL                                :: GRAIN        ! mass of grain XING [g/m2]
     REAL                                :: GDD          ! mass of grain XING[g/m2]
+    REAL                                :: TAVE         !
     INTEGER                             :: PGS          !stem respiration [g/m2/s]
     REAL                                :: STBLCP       ! stable carbon in deep soil [g/m2]
     REAL                                :: FASTCP       ! short-lived carbon, shallow soil [g/m2]
@@ -973,7 +975,6 @@ CONTAINS
 
 
        CALL TRANSFER_MP_PARAMETERS(NSOIL,VEGTYP,SOILTYP,SLOPETYP,SOILCOLOR,CROPTYPE,parameters)
-       
        if(iopt_soil == 3 .and. .not. parameters%urban_flag) then
          
 	sand = 0.01 * soilcomp(i,1:nsoil,j)
@@ -986,17 +987,18 @@ CONTAINS
 
        GRAIN = GRAINXY (I,J)                ! mass of grain XING [g/m2]
        GDD   = GDDXY (I,J)                  ! growing degree days XING
+       TAVE  = TAVEXY(I,J)
        PGS   = PGSXY (I,J)                  ! growing degree days XING
 
-       if(iopt_crop == 1 .and. croptype > 0) then
-         parameters%PLTDAY = PLANTING(I,J)
-	 parameters%HSDAY  = HARVEST (I,J)
-	 parameters%GDDS1  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS1
-	 parameters%GDDS2  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS2
-	 parameters%GDDS3  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS3
-	 parameters%GDDS4  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS4
-	 parameters%GDDS5  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS5
-       end if
+!       if(iopt_crop == 1 .and. croptype > 0) then
+!         parameters%PLTDAY = PLANTING(I,J)
+!	 parameters%HSDAY  = HARVEST (I,J)
+!	 parameters%GDDS1  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS1
+!	 parameters%GDDS2  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS2
+!	 parameters%GDDS3  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS3
+!	 parameters%GDDS4  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS4
+!	 parameters%GDDS5  = SEASON_GDD(I,J) / 1770.0 * parameters%GDDS5
+!       end if
 
        if(iopt_irr == 2) then
          parameters%PLTDAY = PLANTING(I,J)
@@ -1081,6 +1083,7 @@ CONTAINS
          QTLDRN = undefined_value
          GRAIN  = undefined_value
          GDD    = undefined_value
+         TAVE   = undefined_value
          STBLCP = undefined_value 
          FASTCP = undefined_value 
          PLAI   = undefined_value 
@@ -1173,7 +1176,7 @@ CONTAINS
             ZWT     , WA      , WT      , WSLAKE  , LFMASS  , RTMASS  , & ! IN/OUT : 
             STMASS  , WOOD    , STBLCP  , FASTCP  , PLAI    , PSAI    , & ! IN/OUT : 
             CM      , CH      , TAUSS   ,                               & ! IN/OUT : 
-            GRAIN   , GDD     , PGS     ,                               & ! IN/OUT 
+            GRAIN   , GDD     , TAVE    , PGS     ,                     & ! IN/OUT 
             SMCWTD  ,DEEPRECH , RECH    ,                               & ! IN/OUT :
             GECROS1D,                                                   & ! IN/OUT :
             QTLDRN  , TDFRACMP,                                         & ! IN/OUT : tile drainage
@@ -1394,6 +1397,7 @@ CONTAINS
 
              GRAINXY  (I,J) = GRAIN !GRAIN XING
              GDDXY    (I,J) = GDD   !XING 
+             TAVEXY   (I,J) = TAVE
 	     PGSXY    (I,J) = PGS
 
              ! irrigation
@@ -1831,7 +1835,7 @@ SUBROUTINE PEDOTRANSFER_SR2006(nsoil,sand,clay,orgm,parameters)
        fwetxy   ,sneqvoxy ,alboldxy ,qsnowxy, qrainxy, wslakexy, zwtxy, waxy, &
        wtxy     ,tsnoxy   ,zsnsoxy  ,snicexy  ,snliqxy  ,lfmassxy ,rtmassxy , &
        stmassxy ,woodxy   ,stblcpxy ,fastcpxy ,xsaixy   ,lai      ,           &
-       grainxy  ,gddxy    ,                                                   &
+       grainxy  ,gddxy    ,tavexy   ,                                         &
        croptype ,cropcat  ,                      &
        irnumsi  ,irnummi  ,irnumfi  ,irwatsi,    &
        irwatmi  ,irwatfi  ,ireloss  ,irsivol,    &
@@ -1922,6 +1926,7 @@ SUBROUTINE PEDOTRANSFER_SR2006(nsoil,sand,clay,orgm,parameters)
     REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: woodxy      !mass of wood (incl. woody roots) [g/m2]
     REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: grainxy     !mass of grain [g/m2] !XING
     REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: gddxy       !growing degree days !XING
+    REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: tavexy      !running average temperature !ZHE
     REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: stblcpxy    !stable carbon in deep soil [g/m2]
     REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: fastcpxy    !short-lived carbon, shallow soil [g/m2]
     REAL, DIMENSION(ims:ime,jms:jme), INTENT(INOUT) :: xsaixy      !stem area index
@@ -2164,6 +2169,7 @@ SUBROUTINE PEDOTRANSFER_SR2006(nsoil,sand,clay,orgm,parameters)
              fastcpxy   (I,J) = 0.0
              grainxy    (I,J) = 1E-10
              gddxy      (I,J) = 0
+             tavexy     (I,J) = 0.0
 	     cropcat    (I,J) = 0
 
 	   ELSE
@@ -2180,6 +2186,7 @@ SUBROUTINE PEDOTRANSFER_SR2006(nsoil,sand,clay,orgm,parameters)
              fastcpxy   (I,J) = 1000.0                         !
              grainxy    (I,J) = 1E-10
              gddxy      (I,J) = 0    
+             tavexy     (I,J) = 0.0
 
 ! Initialize crop for Liu crop model
 

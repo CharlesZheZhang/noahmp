@@ -464,7 +464,7 @@ contains
                    ZWT     , WA      , WT      , WSLAKE  , LFMASS  , RTMASS  , & ! IN/OUT : 
                    STMASS  , WOOD    , STBLCP  , FASTCP  , LAI     , SAI     , & ! IN/OUT : 
                    CM      , CH      , TAUSS   ,                               & ! IN/OUT : 
-                   GRAIN   , GDD     , PGS     ,                               & ! IN/OUT 
+                   GRAIN   , GDD     , TAVE    , PGS     ,                     & ! IN/OUT 
                    SMCWTD  ,DEEPRECH , RECH    ,                               & ! IN/OUT :
                    GECROS1D,                                                   & ! IN/OUT :
                    QTLDRN  , TDFRACMP,                                         & ! IN/OUT :
@@ -739,7 +739,9 @@ contains
   REAL                        , INTENT(INOUT)    :: SAI    !stem area index [-]
   REAL                        , INTENT(INOUT)    :: GRAIN  !grain mass [g/m2]
   REAL                        , INTENT(INOUT)    :: GDD    !growing degree days
+  REAL                        , INTENT(INOUT)    :: TAVE   !
   INTEGER                     , INTENT(INOUT)    :: PGS    !plant growing stage [-]
+  
 
 ! Tile drainage
   REAL                        , INTENT(INOUT)    :: QTLDRN   !tile drainage [mm] per soil timestep
@@ -1033,7 +1035,7 @@ contains
                          DZSNSO ,STC    ,SMC    ,TV     ,PSN    ,FOLN   ,BTRAN  , & !in
 			 SOLDN  ,T2M    ,                                         & !in
                          LFMASS ,RTMASS ,STMASS ,WOOD   ,STBLCP ,FASTCP ,GRAIN  , & !inout
-			 LAI    ,SAI    ,GDD    ,                                 & !inout
+			 LAI    ,SAI    ,GDD    ,TAVE   ,                         & !inout
                          GPP    ,NPP    ,NEE    ,AUTORS ,HETERS ,TOTSC  ,TOTLB, PGS    ) !out
    END IF
    
@@ -10297,7 +10299,7 @@ END  SUBROUTINE SHALLOWWATERTABLE
                             DZSNSO ,STC    ,SMC    ,TV     ,PSN    ,FOLN   ,BTRAN  , & !in
                             SOLDN  ,T2M    ,                                         & !in
                             LFMASS ,RTMASS ,STMASS ,WOOD   ,STBLCP ,FASTCP ,GRAIN  , & !inout
-			    XLAI   ,XSAI   ,GDD    ,                                 & !inout
+			    XLAI   ,XSAI   ,GDD    ,TAVE   ,                         & !inout
                             GPP    ,NPP    ,NEE    ,AUTORS ,HETERS ,TOTSC  ,TOTLB, PGS    ) !out
 ! ------------------------------------------------------------------------------------------
 ! Initial crop version created by Xing Liu
@@ -10337,6 +10339,7 @@ END  SUBROUTINE SHALLOWWATERTABLE
   REAL                        , INTENT(INOUT) :: XLAI   !leaf area index [-]
   REAL                        , INTENT(INOUT) :: XSAI   !stem area index [-]
   REAL                        , INTENT(INOUT) :: GDD    !growing degree days
+  REAL                        , INTENT(INOUT) :: TAVE   
 
 ! outout
   REAL                          , INTENT(OUT) :: GPP    !net instantaneous assimilation [g/m2/s C]
@@ -10396,7 +10399,7 @@ END  SUBROUTINE SHALLOWWATERTABLE
 
    CALL GROWING_GDD  (parameters,                           & !in
                       T2M ,   DT,  JULIAN,                  & !in
-                      GDD ,                                 & !inout 
+                      GDD , TAVE,                           & !inout 
                       IPA ,  IHA,     PGS)                    !out                        
 
    CALL CO2FLUX_CROP (parameters,                              & !in
@@ -10703,8 +10706,8 @@ END SUBROUTINE CO2FLUX_CROP
 
   SUBROUTINE GROWING_GDD (parameters,                         & !in
                           T2M ,   DT, JULIAN,                 & !in
-                          GDD ,                               & !inout 
-                          IPA,   IHA,     PGS)                  !out  
+                          GDD , TAVE,                         & !inout 
+                          IPA,   IHA,    PGS)                   !out  
 !===================================================================================================
 
 ! input
@@ -10717,7 +10720,7 @@ END SUBROUTINE CO2FLUX_CROP
 ! input and output
 
    REAL                     , INTENT(INOUT)     :: GDD     !growing degress days
-
+   REAL                     , INTENT(INOUT)     :: TAVE    
 ! output
 
    INTEGER                  , INTENT(OUT)       :: IPA     !Planting index index(0=off, 1=on)
@@ -10730,20 +10733,30 @@ END SUBROUTINE CO2FLUX_CROP
    REAL                                         :: DAYOFS2   !DAYS in stage2
    REAL                                         :: TDIFF     !temperature difference for growing degree days calculation
    REAL                                         :: TC
+   INTEGER                                      :: ITIME
 
    TC = T2M - 273.15
-
 !Havestindex(0=on,1=off) 
 
    IPA = 1
    IHA = 1
 
 !turn on/off the planting 
- 
-   IF(JULIAN < parameters%PLTDAY)  IPA = 0
+!when TAVE5 > 10
+ ITIME = INT(JULIAN * 86400/DT)            ! get an time index 
+IF (ITIME < 5*86400/DT) THEN               ! when time index within 5 days
+  TAVE = TAVE*(ITIME-1)/ITIME + TC/ITIME   ! calculate running temperature
+ELSE
+  TAVE = TAVE*(5*86400/DT-1)/(5*86400/DT)+TC/(5*86400/DT)   ! when time index beyond 5 days
+ENDIF                               
+
+IF (TAVE>10) IPA = 1                       ! when 5-day TAVE > 10 C for wheat, 12 C for corn 
+IF (JULIAN < 120)  IPA = 0                 ! also constrain it after 120 DOY (end of Apr)
 
 !turn on/off the harvesting
-    IF(JULIAN >= parameters%HSDAY) IHA = 0
+!when exceeding threshold
+IF (GDDDAY > 1500) IHA = 0                 ! harvest after reaching GDD>1500 for wheat, 1800 for corn
+!   IF(JULIAN >= parameters%HSDAY) IHA = 0
    
 !Calculate the growing degree days
    
@@ -10790,9 +10803,10 @@ END SUBROUTINE CO2FLUX_CROP
 
    IF(GDDDAY >= parameters%GDDS5)  PGS = 7
 
-   IF(JULIAN >= parameters%HSDAY)  PGS = 8
- 
-   IF(JULIAN <  parameters%PLTDAY) PGS = 1   
+   IF(GDDDAY >= 1500)              PGS = 8     ! also constrain PGS with TAVE and GDD threshold
+!   IF(JULIAN >= parameters%HSDAY)  PGS = 8
+   IF(JULIAN <= 120)               PGS = 1                   
+!   IF(JULIAN <  parameters%PLTDAY) PGS = 1   
 
 END SUBROUTINE GROWING_GDD
 
