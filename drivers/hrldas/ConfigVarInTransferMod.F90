@@ -58,6 +58,7 @@ contains
     noahmp%config%nmlist%OptPedotransfer             = NoahmpIO%IOPT_PEDO
     noahmp%config%nmlist%OptRunoffSurface            = NoahmpIO%IOPT_RUNSRF
     noahmp%config%nmlist%OptRunoffSubsurface         = NoahmpIO%IOPT_RUNSUB
+    noahmp%config%nmlist%OptWetlandModel             = NoahmpIO%IOPT_WETLAND ! Add an entry for wetland model, Zhe Zhang
     noahmp%config%nmlist%OptGlacierTreatment         = NoahmpIO%IOPT_GLA
 
     ! config domain variable
