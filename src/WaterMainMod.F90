@@ -205,8 +205,8 @@ contains
     endif
 
     ! call surface wetland scheme (Zhe Zhang 2023)
-    ! if namelistoption_wetland = 1 
-    if ( OptWetlandModel  == 1 ) then
+    ! if namelistoption_wetland >0  
+    if ( OptWetlandModel  > 0 ) then
        call WaterWetland(noahmp,MainTimeStep)
     endif 
     end associate

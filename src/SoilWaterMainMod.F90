@@ -150,7 +150,7 @@ contains
     if ( OptRunoffSurface == 6 ) call RunoffSurfaceVIC(noahmp,SoilTimeStep)
     if ( OptRunoffSurface == 7 ) call RunoffSurfaceXinAnJiang(noahmp,SoilTimeStep)
     if ( OptRunoffSurface == 8 ) call RunoffSurfaceDynamicVic(noahmp,SoilTimeStep,InfilSfcAcc)
-    if ( OptWetlandModel  == 1 ) call RunoffSurfaceWetland(noahmp)
+    if ( OptWetlandModel  >  0 ) call RunoffSurfaceWetland(noahmp)
 
     ! determine iteration times  to solve soil water diffusion and moisture
     NumIterSoilWat = 3
