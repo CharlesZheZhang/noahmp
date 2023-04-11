@@ -85,7 +85,8 @@ module ConfigVarType
                                               ! currently tested & recommended the same option# as surface runoff (default)
     integer :: OptWetlandModel             ! option for wetland model
                                               ! 0 -> No Wetland model (default)
-                                              ! 1 -> Zhang, et al. 2022 wetland model
+                                              ! 1 -> Single-point, (Zhang, et al. 2022 WRR)
+                                              ! 2 -> 2-D regional
     integer :: OptSoilPermeabilityFrozen   ! options for frozen soil permeability
                                               ! 1 -> linear effects, more permeable (default)
                                               ! 2 -> nonlinear effects, less permeable
