@@ -258,7 +258,6 @@ contains
     noahmp%water%param%BaseflowCoeff               = undefined_real
     noahmp%water%param%GridTopoIndex               = undefined_real
     noahmp%water%param%SoilSfcSatFracMax           = undefined_real
-    noahmp%water%param%WetlandCapMax               = undefined_real
     noahmp%water%param%SpecYieldGw                 = undefined_real
     noahmp%water%param%MicroPoreContent            = undefined_real
     noahmp%water%param%WaterStorageLakeMax         = undefined_real

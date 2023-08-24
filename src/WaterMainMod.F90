@@ -11,7 +11,6 @@ module WaterMainMod
   use IrrigationFloodMod,  only : IrrigationFlood
   use IrrigationMicroMod,  only : IrrigationMicro
   use SoilWaterMainMod,    only : SoilWaterMain
-  use WaterWetlandMod,     only : WaterWetland
 
   implicit none
 
@@ -41,7 +40,6 @@ contains
               FlagUrban              => noahmp%config%domain%FlagUrban              ,& ! in,    urban point flag
               FlagSoilProcess        => noahmp%config%domain%FlagSoilProcess        ,& ! in,    flag to calculate soil processes
               NumSoilTimeStep        => noahmp%config%domain%NumSoilTimeStep        ,& ! in,    number of timesteps for soil process calculation
-              OptWetlandModel        => noahmp%config%nmlist%OptWetlandModel        ,& ! in,    options for wetland model
               VaporizeGrd            => noahmp%water%flux%VaporizeGrd               ,& ! in,    ground vaporize rate total (evap+sublim) [mm/s]
               CondenseVapGrd         => noahmp%water%flux%CondenseVapGrd            ,& ! in,    ground vapor condense rate total (dew+frost) [mm/s]
               RainfallGround         => noahmp%water%flux%RainfallGround            ,& ! in,    ground surface rain rate [mm/s]
@@ -204,11 +202,6 @@ contains
        SpecHumidity2mBare = SpecHumiditySfc
     endif
 
-    ! call surface wetland scheme (Zhe Zhang 2023)
-    ! if namelistoption_wetland >0  
-    if ( OptWetlandModel  > 0 ) then
-       call WaterWetland(noahmp,MainTimeStep)
-    endif 
     end associate
 
   end subroutine WaterMain

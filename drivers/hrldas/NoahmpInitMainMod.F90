@@ -146,8 +146,6 @@ contains
              NoahmpIO%CMXY(I,J)     = 0.0
              NoahmpIO%CHXY(I,J)     = 0.0
              NoahmpIO%FWETXY(I,J)   = 0.0
-             NoahmpIO%FSATXY(I,J)   = 0.0
-             NoahmpIO%WSURFXY(I,J)  = 0.0 
              NoahmpIO%SNEQVOXY(I,J) = 0.0
              NoahmpIO%ALBOLDXY(I,J) = 0.65
              NoahmpIO%QSNOWXY(I,J)  = 0.0
