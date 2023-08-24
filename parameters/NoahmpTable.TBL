@@ -428,6 +428,7 @@
  ! runoff parameters used for SIMTOP and SIMGM
  TIMEAN           = 10.5        ! gridcell mean topgraphic index (global mean)
  FSATMX           = 0.38        ! maximum surface saturated fraction (global mean) 
+ WCAP             = 0.10        ! maximum wetland capacity (tunable) 
  ROUS             = 0.20        ! specific yield [-] for Niu et al. 2007 groundwater scheme (OptRunoffSubsurface=1)
  CMIC             = 0.80        ! microprore content (0.0-1.0), 0.0: close to free drainage
  ! parameters for snow processes
