@@ -14,6 +14,26 @@ module NoahmpIOVarType
   save
   private
 
+  !------------------------------------------------------------------------
+  ! Abstract interfaces for parallel services supplied by the DRIVER layer
+  ! (offline: module_hrldas_netcdf_io).  The physics stays free of IO/MPI
+  ! imports; it calls these through procedure pointers on NoahmpIO, which
+  ! the driver associates after READ_MPAS_GEOMETRY.  In serial runs the
+  ! same routines degenerate to a copy / identity.
+  !------------------------------------------------------------------------
+  abstract interface
+     subroutine gather_global_iface(vec_local, xstart, xend, vec_glob)
+       import :: kind_noahmp
+       integer, intent(in)  :: xstart, xend
+       real(kind=kind_noahmp), intent(in)  :: vec_local(xstart:xend)
+       real(kind=kind_noahmp), intent(out) :: vec_glob(:)
+     end subroutine gather_global_iface
+     function global_sum_int_iface(n) result(nsum)
+       integer, intent(in) :: n
+       integer             :: nsum
+     end function global_sum_int_iface
+  end interface
+
   type, public :: NoahmpIO_type
 
 !------------------------------------------------------------------------
@@ -352,7 +372,40 @@ module NoahmpIOVarType
     real(kind=kind_noahmp), allocatable, dimension(:,:)    ::  RECHCLIM            ! climatology recharge
     real(kind=kind_noahmp), allocatable, dimension(:,:)    ::  RIVERMASK           ! river mask
     real(kind=kind_noahmp), allocatable, dimension(:,:)    ::  NONRIVERXY          ! non-river portion
-    real(kind=kind_noahmp)                                 ::  WTDDT  = 30.0       ! frequency of groundwater call [minutes]
+!------------------------------------------------------------------------
+    ! MPAS unstructured-mesh geometry & connectivity for MMF groundwater
+    ! lateral flow on unstructured grids (IOPT_RUNSUB = 5).
+    ! Allocated ONLY in the driver (module_NoahMP_hrldas_driver) when
+    ! IOPT_RUNSUB == 5, filled by READ_MPAS_GEOMETRY; any code touching these
+    ! must sit inside that gate (non-MMF runs never allocate them).
+    ! Verified semantics (central_us mesh):
+    !   DCEDGE = cell-center to cell-center distance [m]
+    !   DVEDGE = shared-face (edge) length [m]
+    !     -> lateral-flow geometric weight = DVEDGE/DCEDGE per face
+    !   CELLSONCELL == 0 means "no neighbor across this face"; occurs in
+    !   active slots (j <= NEDGESONCELL) at the outer mesh boundary, so the
+    !   kernel must guard jCell < 1 .or. jCell > NCELLS.
+    !------------------------------------------------------------------------
+    logical                                                ::  FLAG_UNSTRUCTURED = .false. ! .true. = MPAS unstructured mesh (set by driver after geometry read)
+    integer                                                ::  NCELLS       ! number of primary-mesh cells (GLOBAL; == XEND only in serial runs)
+    integer                                                ::  NEDGES       ! number of mesh edges
+    integer                                                ::  MAXEDGES     ! max faces per cell (mesh dependent: 8 central_us, 10 global 15km)
+    integer,                allocatable, dimension(:)      ::  NEDGESONCELL ! (nCells) faces/neighbors per cell (5/6/7)
+    integer,                allocatable, dimension(:,:)    ::  CELLSONCELL  ! (maxEdges,nCells) GLOBAL neighbor indices; 0 = none
+    integer,                allocatable, dimension(:,:)    ::  EDGESONCELL  ! (maxEdges,nCells) edge index of each face
+    integer,                allocatable, dimension(:)      ::  BDYMASKCELL  ! (nCells) 0=interior; >0 relaxation/specified zone
+    real(kind=kind_noahmp), allocatable, dimension(:)      ::  DVEDGE       ! (nEdges) shared-face length [m]
+    real(kind=kind_noahmp), allocatable, dimension(:)      ::  DCEDGE       ! (nEdges) cell-center distance [m]
+    real(kind=kind_noahmp), allocatable, dimension(:)      ::  AREACELL     ! (nCells) exact cell area [m2]
+    ! parallel services (driver-associated; see abstract interfaces above):
+    !   gatherGlobal: assemble a global 1-D field from per-rank patches
+    !                 (serial: copy).  Used by LATERALFLOW every call.
+    !   globalSumInt: sum an integer over ranks (serial: identity).  Used
+    !                 by the groundwater-init iteration so ALL ranks take
+    !                 the same convergence branch (collective safety).
+    procedure(gather_global_iface),  pointer, nopass       ::  gatherGlobal => null()
+    procedure(global_sum_int_iface), pointer, nopass       ::  globalSumInt => null()
+    real(kind=kind_noahmp)                                 ::  WTDDT  = 180.0      ! frequency of groundwater call [minutes]
     integer                                                ::  STEPWTD             ! step of groundwater call
 
 !------------------------------------------------------------------------

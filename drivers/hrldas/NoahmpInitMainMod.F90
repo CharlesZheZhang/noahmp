@@ -158,7 +158,13 @@ contains
              else
                 NoahmpIO%WAXY(I,J)   = 0.0
                 NoahmpIO%WTXY(I,J)   = 0.0
-                NoahmpIO%AREAXY(I,J) = (NoahmpIO%DX*NoahmpIO%DY) / (NoahmpIO%MSFTX(I,J)*NoahmpIO%MSFTY(I,J))
+                if ( NoahmpIO%FLAG_UNSTRUCTURED ) then
+                   ! unstructured MPAS mesh: exact cell area from areaCell
+                   NoahmpIO%AREAXY(I,J) = NoahmpIO%AREACELL(I)
+                else
+                   ! structured grid: cell area from grid spacing and map factors
+                   NoahmpIO%AREAXY(I,J) = (NoahmpIO%DX*NoahmpIO%DY) / (NoahmpIO%MSFTX(I,J)*NoahmpIO%MSFTY(I,J))
+                endif 
              endif
 
              urbanpt_flag = .false.

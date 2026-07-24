@@ -3,7 +3,7 @@ module GroundWaterMmfMod
 !!! Module to calculate lateral groundwater flow and the flux between groundwater and rivers
 !!! plus the routine to update soil moisture and water table due to those two fluxes
 !!! according to the Miguez-Macho & Fan groundwater scheme (Miguez-Macho et al., JGR 2007).
-!!! Module written by Gonzalo Miguez-Macho , U. de Santiago de Compostela, Galicia, Spain
+!!! Module written by Gonzalo Miguez-Macho, U. de Santiago de Compostela, Galicia, Spain
 !!! November 2012 
 
 ! ------------------------ Code history -----------------------------------
@@ -11,13 +11,48 @@ module GroundWaterMmfMod
 ! Original code: Miguez-Macho&Fan (Miguez-Macho et al 2007, Fan et al 2007)
 ! Refactered code: C. He, P. Valayamkunnath, & refactor team (He et al. 2023)
 ! Note: this MMF scheme needs further refactoring
+!
+! UNSTRUCTURED-GRID VERSION (MPAS Voronoi mesh), Z. Zhang 2026 (hrldas_mpas_mmf):
+!  * LATERALFLOW rewritten for the MPAS unstructured mesh:
+!      - fixed 8-point (I+-1,J+-1) stencil with the octagon geometric factor
+!        FANGLE = 0.5*sqrt(0.5*tan(pi/8)) replaced by a loop over each cell's
+!        actual nEdgesOnCell neighbors (hexagons/pentagons/heptagons), with
+!        the exact finite-volume Darcy weight
+!            latWeight = dvEdge/dcEdge   (shared-face length / center distance)
+!        computed on the fly from NoahmpIO mesh geometry (Option A).
+!      - transmissivity across a face = arithmetic mean 0.5*(KCELL_i+KCELL_nb)
+!        (the 0.5 was folded into FANGLE in the structured code).
+!      - boundary handling: cells are skipped (QLAT=0) if bdyMaskCell>0, or if
+!        ANY neighbor is missing (cellsOnCell=0 at the outer mesh ring) or in
+!        the boundary zone -- the unstructured analog of the structured code's
+!        interior-only loop bounds (its+1:ite-1 etc.).
+!      - PARALLEL DESIGN (supersedes decision D3): mesh geometry
+!        (cellsOnCell etc.) is GLOBAL on every rank (READ_MPAS_GEOMETRY);
+!        prognostic state is decomposed (its:ite = xstart:xend).  The
+!        neighbor loop needs neighbor KCELL/HEAD, so LATERALFLOW computes
+!        them for OWNED cells and assembles global copies through
+!        NoahmpIO%gatherGlobal -- a procedure pointer the driver associates
+!        with the offline gather (MPI_Allgatherv under MPP_LAND; a plain
+!        copy in serial).  One code path serves serial regional and
+!        MPI-decomposed global runs; no IO/MPI imports in this module.
+!        Serial = (xstart=1, xend=nCells, 1 rank); XSTART=1 is NO LONGER
+!        required.
+!  * WTABLE_mmf_noahmp and UPDATEWTD are UNCHANGED from the structured code:
+!    they are column-wise and loop the full tile, so they operate correctly
+!    on the degenerate (1:nCells, j=1) layout as-is.
 ! -------------------------------------------------------------------------
 
   use NoahmpIOVarType
   use NoahmpVarType
   use Machine
 
-   implicit none
+  implicit none
+
+  ! persistent global-on-every-rank buffers for the lateral-flow stencil,
+  ! assembled by NoahmpIO%gatherGlobal each LATERALFLOW call (allocated on
+  ! first use at NoahmpIO%NCELLS; ~10 MB each at 2.6M cells)
+  real(kind=kind_noahmp), allocatable, save, private :: gw_kcell_glob(:)
+  real(kind=kind_noahmp), allocatable, save, private :: gw_head_glob(:)
 
 contains
 
@@ -43,8 +78,9 @@ contains
   INTEGER,  INTENT(IN   )     ::     ids,ide, jds,jde, kds,kde,  &
        &                             ims,ime, jms,jme, kms,kme,  &
        &                             its,ite, jts,jte, kts,kte
-    REAL,   INTENT(IN)        ::     WTDDT
-    REAL,   INTENT(IN)        ::     XICE_THRESHOLD
+
+    REAL(kind=kind_noahmp), INTENT(IN)                 :: WTDDT
+    REAL(kind=kind_noahmp), INTENT(IN)                 :: XICE_THRESHOLD
     INTEGER,  INTENT(IN   )   ::     ISICE
     REAL,    DIMENSION( ims:ime, jms:jme )                     , &
          &   INTENT(IN   )    ::                          XLAND, &
@@ -54,10 +90,10 @@ contains
                                                          IVGTYP
     INTEGER, INTENT(IN)       ::     nsoil
     INTEGER, INTENT(IN)       ::     ISURBAN
-    REAL,     DIMENSION( ims:ime , 1:nsoil, jms:jme ), &
+    REAL(kind=kind_noahmp), DIMENSION( ims:ime , 1:nsoil, jms:jme ),     &
          &    INTENT(IN)      ::                        SMOISEQ
-    REAL,     DIMENSION(1:nsoil), INTENT(IN)     ::         DZS
-    REAL,    DIMENSION( ims:ime, jms:jme )                     , &
+    REAL(kind=kind_noahmp), DIMENSION(1:nsoil), INTENT(IN)  :: DZS
+    REAL(kind=kind_noahmp), DIMENSION( ims:ime, jms:jme )              , &
          &   INTENT(IN)       ::                         FDEPTH, &
                                                            AREA, &
                                                            TOPO, &
@@ -68,12 +104,10 @@ contains
 
 ! IN and OUT 
 
-    REAL,     DIMENSION( ims:ime , 1:nsoil, jms:jme ), &
+    REAL(kind=kind_noahmp), DIMENSION( ims:ime , 1:nsoil, jms:jme ),     &
          &    INTENT(INOUT)   ::                          SMOIS, &
          &                                                SH2OXY 
-
-
-    REAL,    DIMENSION( ims:ime, jms:jme )                     , &
+    REAL(kind=kind_noahmp), DIMENSION( ims:ime, jms:jme )              , &
          &   INTENT(INOUT)    ::                            WTD, &
                                                          SMCWTD, &
                                                        DEEPRECH, &
@@ -84,23 +118,22 @@ contains
 
 !OUT
 
-    REAL,    DIMENSION( ims:ime, jms:jme )                     , &
+    REAL(kind=kind_noahmp), DIMENSION( ims:ime, jms:jme )              , &
          &   INTENT(OUT)      ::                            QRF, &  !groundwater - river water flux
                                                         QSPRING     !water springing at the surface from groundwater convergence in the column
 
 !LOCAL  
   
-  INTEGER                          :: I,J,K  
-  REAL, DIMENSION(       0:NSOIL)  :: ZSOIL !depth of soil layer-bottom [m]
-  REAL,  DIMENSION(      1:NSOIL)  :: SMCEQ  !equilibrium soil water  content [m3/m3]
-  REAL,  DIMENSION(      1:NSOIL)  :: SMC,SH2O
-  REAL                                        :: DELTAT,RCOND,TOTWATER,PSI &
-                                                ,WFLUXDEEP,WCNDDEEP,DDZ,SMCWTDMID &
-                                                ,WPLUS,WMINUS
-  REAL,      DIMENSION( ims:ime, jms:jme ), INTENT(OUT)   :: QLAT
-  INTEGER,   DIMENSION( ims:ime, jms:jme )    :: LANDMASK !-1 for water (ice or no ice) and glacial areas, 1 for land where the LSM does its soil moisture calculations.
-  
-  REAL :: BEXP,DKSAT,PSISAT,SMCMAX,SMCWLT
+    INTEGER                          :: I,J,K  
+    REAL(kind=kind_noahmp), DIMENSION( 0:NSOIL)        :: ZSOIL  ! depth of soil layer-bottom [m]
+    REAL(kind=kind_noahmp), DIMENSION( 1:NSOIL)        :: SMCEQ  ! equilibrium soil water content [m3/m3]
+    REAL(kind=kind_noahmp), DIMENSION( 1:NSOIL)        :: SMC,SH2O
+    REAL(kind=kind_noahmp)                             :: DELTAT,RCOND,TOTWATER,PSI  &
+                                                          ,WFLUXDEEP,WCNDDEEP,DDZ,SMCWTDMID &
+                                                          ,WPLUS,WMINUS
+    REAL(kind=kind_noahmp), DIMENSION( ims:ime, jms:jme ), INTENT(OUT) :: QLAT
+    INTEGER, DIMENSION( ims:ime, jms:jme )             :: LANDMASK  ! -1 for water (ice or no ice) and glacial areas, 1 for land where the LSM does its soil moisture calculations.
+    REAL(kind=kind_noahmp)                             :: BEXP,DKSAT,PSISAT,SMCMAX,SMCWLT
 
     DELTAT = WTDDT * 60. !timestep in seconds for this calculation
 
@@ -222,157 +255,152 @@ contains
                            ,ims,ime,jms,jme,kms,kme                                   &
                            ,its,ite,jts,jte,kts,kte                                   )
 ! ----------------------------------------------------------------------
-!  USE NOAHMP_TABLES, ONLY : DKSAT_TABLE
-
-#ifdef MPP_LAND
-    ! MPP_LAND only for HRLDAS Noah-MP/WRF-Hydro - Prasanth Valayamkunnath (06/10/2022)
-     use module_mpp_land, only: mpp_land_com_real, mpp_land_com_integer, global_nx, global_ny, my_id
-#endif
+! UNSTRUCTURED (MPAS Voronoi) VERSION -- serial, single task.
+!
+! Darcy lateral flow between cell I and each of its nEdgesOnCell(I)
+! neighbors NB across the shared Voronoi face:
+!
+!   Q_face = 0.5*(KCELL(NB)+KCELL(I)) * (HEAD(NB)-HEAD(I)) * dvEdge/dcEdge
+!
+! where dvEdge = shared-face length, dcEdge = center-to-center distance
+! (semantics verified against the mesh file; latWeight = dvEdge/dcEdge).
+! Q is in m3/s; QLAT = sum(Q_face)*DELTAT/AREA gives meters over DELTAT.
+!
+! The per-cell KCELL (transmissivity) and HEAD formulas are IDENTICAL to
+! the structured code. Only the neighbor geometry changed: the fixed
+! 8-point stencil with FANGLE (square-cell octagon factor, 0.5 folded in)
+! is replaced by the exact finite-volume weights of the actual mesh.
+!
+! Skipped cells (QLAT stays 0):
+!   - non-land (LANDMASK <= 0)
+!   - bdyMaskCell > 0 (relaxation/specified zone of the regional mesh)
+!   - any neighbor missing (cellsOnCell == 0, outer mesh ring) or any
+!     neighbor with bdyMaskCell > 0  [design decision D4]
+!
+! Parallel layout: loops OWNED cells (its:ite = xstart:xend); neighbor
+! KCELL/HEAD come from global buffers gathered via NoahmpIO%gatherGlobal
+! (Jacobi snapshot -> bit-identical results for any rank count).  Serial
+! runs take the same path with a copy-gather.
 ! ----------------------------------------------------------------------
-  IMPLICIT NONE
+    IMPLICIT NONE
 ! ----------------------------------------------------------------------
 ! input
-
-  type(NoahmpIO_type), intent(in)    :: NoahmpIO
-
-  INTEGER,  INTENT(IN   )   ::     ids,ide, jds,jde, kds,kde,  &
+    type(NoahmpIO_type), intent(in)    :: NoahmpIO
+    INTEGER,  INTENT(IN   )   ::     ids,ide, jds,jde, kds,kde,  &
        &                           ims,ime, jms,jme, kms,kme,  &
        &                           its,ite, jts,jte, kts,kte
-  REAL                                  , INTENT(IN) :: DELTAT                                 
-  INTEGER, DIMENSION( ims:ime, jms:jme ), INTENT(IN) :: ISLTYP, LANDMASK
-  REAL,    DIMENSION( ims:ime, jms:jme ), INTENT(IN) :: FDEPTH,WTD,TOPO,AREA
+    REAL                                  , INTENT(IN) :: DELTAT                                 
+    INTEGER, DIMENSION( ims:ime, jms:jme ), INTENT(IN) :: ISLTYP, LANDMASK
+    REAL,    DIMENSION( ims:ime, jms:jme ), INTENT(IN) :: FDEPTH,WTD,TOPO,AREA
 
 !output
-  REAL, DIMENSION( ims:ime , jms:jme ), INTENT(OUT) :: QLAT
+    REAL, DIMENSION( ims:ime , jms:jme ), INTENT(OUT) :: QLAT
 
 !local
-  INTEGER                              :: I, J, itsh, iteh, jtsh, jteh, nx, ny
-  REAL                                 :: Q, KLAT
+    INTEGER                                            :: I, J, JJ, NB, IE
+    LOGICAL                                            :: ELIGIBLE
+    REAL(kind=kind_noahmp)                             :: Q, KLAT, WGT
+    ! patch-local (owned cells only); global copies live in the module
+    ! buffers gw_kcell_glob / gw_head_glob, assembled below
+    REAL(kind=kind_noahmp), ALLOCATABLE                :: KCELL_L(:), HEAD_L(:)
+    REAL(kind=kind_noahmp), DIMENSION(19)              :: KLATFACTOR
+    DATA KLATFACTOR /2.,3.,4.,10.,10.,12.,14.,20.,24.,28.,40.,48.,2.,0.,10.,0.,20.,2.,2./
 
-#ifdef MPP_LAND 
-  ! halo'ed arrays
-  REAL,    DIMENSION(ims-1:ime+1, jms-1:jme+1) :: KCELL, HEAD
-  integer, dimension(ims-1:ime+1, jms-1:jme+1) :: landmask_h
-  real,    dimension(ims-1:ime+1, jms-1:jme+1) :: area_h, qlat_h
-#else
-  REAL,    DIMENSION(ims:ime, jms:jme) :: KCELL, HEAD
-#endif
+    ! defensive: this kernel is only valid on the unstructured mesh
+    IF ( .NOT. NoahmpIO%FLAG_UNSTRUCTURED ) THEN
+       WRITE(*,*) 'LATERALFLOW (unstructured version): FLAG_UNSTRUCTURED is false.'
+       WRITE(*,*) 'This GroundWaterMmfMod is the MPAS-mesh version (hrldas_mpas_mmf);'
+       WRITE(*,*) 'it requires the mesh geometry loaded by READ_MPAS_GEOMETRY.'
+       STOP 'LATERALFLOW: not an unstructured-grid run'
+    ENDIF
+    IF ( .NOT. ASSOCIATED(NoahmpIO%gatherGlobal) ) THEN
+       WRITE(*,*) 'LATERALFLOW: NoahmpIO%gatherGlobal is not associated.'
+       WRITE(*,*) 'The driver must set it (after READ_MPAS_GEOMETRY) to the'
+       WRITE(*,*) 'gather routine, e.g. gather_global_wtd from module_hrldas_netcdf_io.'
+       STOP 'LATERALFLOW: gatherGlobal not associated'
+    ENDIF
 
-  REAL, DIMENSION(19)      :: KLATFACTOR
-  DATA KLATFACTOR /2.,3.,4.,10.,10.,12.,14.,20.,24.,28.,40.,48.,2.,0.,10.,0.,20.,2.,2./
+    IF (.NOT. ALLOCATED(gw_kcell_glob)) THEN
+       ALLOCATE( gw_kcell_glob(NoahmpIO%NCELLS) )
+       ALLOCATE( gw_head_glob (NoahmpIO%NCELLS) )
+    ENDIF
+    ALLOCATE( KCELL_L(its:ite), HEAD_L(its:ite) )
 
-  REAL,    PARAMETER :: PI = 3.14159265 
-  REAL,    PARAMETER :: FANGLE = 0.22754493   ! = 0.5*sqrt(0.5*tan(pi/8))
-
-#ifdef MPP_LAND
-! create halo'ed local copies of tile vars
-  landmask_h(ims:ime, jms:jme) = landmask
-  area_h(ims:ime, jms:jme)     = area
-
-  nx = ((ime-ims) + 1) + 2      ! include halos
-  ny = ((jme-jms) + 1) + 2      ! include halos
-  
-  !copy neighbor's values for landmask and area
-  call mpp_land_com_integer(landmask_h, nx, ny, 99)
-  call mpp_land_com_real(area_h, nx, ny, 99)
-
-  itsh=max(its,1)
-  iteh=min(ite,global_nx)
-  jtsh=max(jts,1)
-  jteh=min(jte,global_ny)
-#else
-  itsh=max(its-1,ids)
-  iteh=min(ite+1,ide-1)
-  jtsh=max(jts-1,jds)
-  jteh=min(jte+1,jde-1)
-#endif
-
-    DO J=jtsh,jteh
-       DO I=itsh,iteh
-           IF(FDEPTH(I,J).GT.0.)THEN
-                 KLAT = NoahmpIO%DKSAT_TABLE(ISLTYP(I,J)) * KLATFACTOR(ISLTYP(I,J))
-                 IF(WTD(I,J) < -1.5)THEN
-                     KCELL(I,J) = FDEPTH(I,J) * KLAT * EXP( (WTD(I,J) + 1.5) / FDEPTH(I,J) )
-                 ELSE
-                     KCELL(I,J) = KLAT * ( WTD(I,J) + 1.5 + FDEPTH(I,J) )  
-                 ENDIF
-           ELSE
-                 KCELL(i,J) = 0.
-           ENDIF
-
-           HEAD(I,J) = TOPO(I,J) + WTD(I,J)
-       ENDDO
-    ENDDO
-
-#ifdef MPP_LAND
-! update neighbors with kcell/head/calculation
-    call mpp_land_com_real(KCELL, nx, ny, 99)
-    call mpp_land_com_real(HEAD, nx, ny, 99)
-
-    itsh=max(its,2)
-    iteh=min(ite,global_nx-1)
-    jtsh=max(jts,2)
-    jteh=min(jte,global_ny-1)
-    
-    qlat_h  = 0.
-#else
-    itsh=max(its,ids+1)
-    iteh=min(ite,ide-2)
-    jtsh=max(jts,jds+1)
-    jteh=min(jte,jde-2)
-#endif
-
-    DO J=jtsh,jteh
-       DO I=itsh,iteh
-#ifdef MPP_LAND
-          IF( landmask_h(I,J).GT.0 )THEN
-#else
-          IF( LANDMASK(I,J).GT.0   )THEN
-#endif
-                 Q=0.
-                             
-                 Q  = Q + (KCELL(I-1,J+1)+KCELL(I,J)) &
-                        * (HEAD(I-1,J+1)-HEAD(I,J))/SQRT(2.)
-                             
-                 Q  = Q +  (KCELL(I-1,J)+KCELL(I,J)) &
-                        *  (HEAD(I-1,J)-HEAD(I,J))
-
-                 Q  = Q +  (KCELL(I-1,J-1)+KCELL(I,J)) &
-                        * (HEAD(I-1,J-1)-HEAD(I,J))/SQRT(2.)
-
-                 Q  = Q +  (KCELL(I,J+1)+KCELL(I,J)) &
-                        * (HEAD(I,J+1)-HEAD(I,J))
-
-                 Q  = Q +  (KCELL(I,J-1)+KCELL(I,J)) &
-                        * (HEAD(I,J-1)-HEAD(I,J))
-
-                 Q  = Q +  (KCELL(I+1,J+1)+KCELL(I,J)) &
-                        * (HEAD(I+1,J+1)-HEAD(I,J))/SQRT(2.)
-  
-                 Q  = Q +  (KCELL(I+1,J)+KCELL(I,J)) &
-                        * (HEAD(I+1,J)-HEAD(I,J))
-
-                 Q  = Q +  (KCELL(I+1,J-1)+KCELL(I,J)) &
-                        * (HEAD(I+1,J-1)-HEAD(I,J))/SQRT(2.)
-
-                 ! Here, Q is in m3/s. To convert to m, divide it by area of the grid cell.
-#ifdef MPP_LAND
-                 qlat_h(I, J)  = (FANGLE * Q * DELTAT / area_h(I, J))
-#else
-                 QLAT(I,J) = FANGLE* Q * DELTAT / AREA(I,J)
-#endif
+! ------------------------------------------------------------------
+! per-cell transmissivity and head for OWNED cells: physics IDENTICAL
+! to the structured code; only the target arrays are patch-local
+! ------------------------------------------------------------------
+    J = jts   ! degenerate second dimension (j=1) on the vector mesh
+    DO I=its,ite
+       IF(FDEPTH(I,J).GT.0.)THEN
+          KLAT = NoahmpIO%DKSAT_TABLE(ISLTYP(I,J)) * KLATFACTOR(ISLTYP(I,J))
+          IF(WTD(I,J) < -1.5)THEN
+             KCELL_L(I) = FDEPTH(I,J) * KLAT * EXP( (WTD(I,J) + 1.5) / FDEPTH(I,J) )
+          ELSE
+             KCELL_L(I) = KLAT * ( WTD(I,J) + 1.5 + FDEPTH(I,J) )
           ENDIF
-       ENDDO
+       ELSE
+          KCELL_L(I) = 0.
+       ENDIF
+
+       HEAD_L(I) = TOPO(I,J) + WTD(I,J)
     ENDDO
 
-#ifdef MPP_LAND
-! merge (sum) of all neighbor's edge Q's
-    call mpp_land_com_real(qlat_h, nx, ny, 1)
-    qlat = qlat_h(ims:ime, jms:jme)
-#endif
- 
-  end subroutine LATERALFLOW
+! ------------------------------------------------------------------
+! assemble the GLOBAL KCELL/HEAD snapshot (serial: a copy; MPI: one
+! Allgatherv each).  All ranks then compute every edge flux from the
+! same snapshot: antisymmetry (conservation) and Jacobi semantics are
+! preserved exactly -> bit-identical to serial for any rank count.
+! ------------------------------------------------------------------
+    CALL NoahmpIO%gatherGlobal( KCELL_L, its, ite, gw_kcell_glob )
+    CALL NoahmpIO%gatherGlobal( HEAD_L,  its, ite, gw_head_glob  )
 
+! ------------------------------------------------------------------
+! neighbor loop over the actual Voronoi faces (replaces 8-pt stencil)
+! ------------------------------------------------------------------
+    ! neighbors indexed by GLOBAL cell id NB into the gathered buffers;
+    ! cell I also reads its OWN state from the buffers (same snapshot on
+    ! every rank that touches a given edge)
+    DO I=its,ite
+       IF( LANDMASK(I,J).GT.0 )THEN
+
+          ! eligibility per design D4: skip boundary-zone cells and cells
+          ! with a missing or boundary-zone neighbor (one-sided stencils
+          ! are not allowed; the structured analog was the interior-only
+          ! loop bounds)
+          ELIGIBLE = ( NoahmpIO%BDYMASKCELL(I) == 0 )
+          IF (ELIGIBLE) THEN
+             DO JJ = 1, NoahmpIO%NEDGESONCELL(I)
+                NB = NoahmpIO%CELLSONCELL(JJ,I)
+                IF ( (NB < 1) .OR. (NB > NoahmpIO%NCELLS) ) THEN
+                   ELIGIBLE = .FALSE.
+                   EXIT
+                ELSEIF ( NoahmpIO%BDYMASKCELL(NB) > 0 ) THEN
+                   ELIGIBLE = .FALSE.
+                   EXIT
+                ENDIF
+             ENDDO
+          ENDIF
+
+          IF (ELIGIBLE) THEN
+             Q = 0.
+             DO JJ = 1, NoahmpIO%NEDGESONCELL(I)
+                NB  = NoahmpIO%CELLSONCELL(JJ,I)
+                IE  = NoahmpIO%EDGESONCELL(JJ,I)
+                WGT = NoahmpIO%DVEDGE(IE) / NoahmpIO%DCEDGE(IE)   ! face length / center distance
+                Q   = Q + 0.5 * ( gw_kcell_glob(NB) + gw_kcell_glob(I) )      &
+                            * ( gw_head_glob(NB) - gw_head_glob(I) ) * WGT
+             ENDDO
+! Here, Q is in m3/s. To convert to m, divide it by area of the grid cell.
+             QLAT(I,J) = Q * DELTAT / AREA(I,J)
+          ENDIF
+
+       ENDIF
+    ENDDO
+
+    DEALLOCATE( KCELL_L, HEAD_L )
+
+  end subroutine LATERALFLOW
 
 ! ==================================================================================================
 ! ----------------------------------------------------------------------
@@ -384,37 +412,35 @@ contains
   IMPLICIT NONE
 ! ----------------------------------------------------------------------
 ! input
-  INTEGER,                         INTENT(IN) :: NSOIL !no. of soil layers
-  INTEGER,                         INTENT(IN) :: ILOC, JLOC
-  REAL,                         INTENT(IN)    :: SMCMAX
-  REAL,                         INTENT(IN)    :: SMCWLT
-  REAL,                         INTENT(IN)    :: PSISAT
-  REAL,                         INTENT(IN)    :: BEXP
-  REAL,  DIMENSION(       0:NSOIL), INTENT(IN) :: ZSOIL !depth of soil layer-bottom [m]
-  REAL,  DIMENSION(       1:NSOIL), INTENT(IN) :: SMCEQ  !equilibrium soil water  content [m3/m3]
-  REAL,  DIMENSION(       1:NSOIL), INTENT(IN) :: DZS ! soil layer thickness [m]
+    INTEGER,  INTENT(IN)                               :: NSOIL  ! no. of soil layers
+    INTEGER,  INTENT(IN)                               :: ILOC, JLOC
+    REAL(kind=kind_noahmp),  INTENT(IN)                :: SMCMAX
+    REAL(kind=kind_noahmp),  INTENT(IN)                :: SMCWLT
+    REAL(kind=kind_noahmp),  INTENT(IN)                :: PSISAT
+    REAL(kind=kind_noahmp),  INTENT(IN)                :: BEXP
+    REAL(kind=kind_noahmp),  DIMENSION( 0:NSOIL), INTENT(IN) :: ZSOIL ! depth of soil layer-bottom [m]
+    REAL(kind=kind_noahmp),  DIMENSION( 1:NSOIL), INTENT(IN) :: SMCEQ ! equilibrium soil water content [m3/m3]
+    REAL(kind=kind_noahmp),  DIMENSION( 1:NSOIL), INTENT(IN) :: DZS   ! soil layer thickness [m]
 ! input-output
-  REAL                           , INTENT(INOUT) :: TOTWATER
-  REAL                           , INTENT(INOUT) :: WTD
-  REAL                           , INTENT(INOUT) :: SMCWTD
-  REAL, DIMENSION(       1:NSOIL), INTENT(INOUT) :: SMC
-  REAL, DIMENSION(       1:NSOIL), INTENT(INOUT) :: SH2O
+    REAL(kind=kind_noahmp)                    , INTENT(INOUT) :: TOTWATER
+    REAL(kind=kind_noahmp)                    , INTENT(INOUT) :: WTD
+    REAL(kind=kind_noahmp)                    , INTENT(INOUT) :: SMCWTD
+    REAL(kind=kind_noahmp), DIMENSION( 1:NSOIL), INTENT(INOUT) :: SMC
+    REAL(kind=kind_noahmp), DIMENSION( 1:NSOIL), INTENT(INOUT) :: SH2O
 ! output
-  REAL                           , INTENT(OUT) :: QSPRING
+    REAL(kind=kind_noahmp)                    , INTENT(OUT)   :: QSPRING
 !local
-  INTEGER                                     :: K
-  INTEGER                                     :: K1
-  INTEGER                                     :: IWTD
-  INTEGER                                     :: KWTD
-  REAL                                        :: MAXWATUP, MAXWATDW ,WTDOLD
-  REAL                                        :: WGPMID
-  REAL                                        :: SYIELDDW
-  REAL                                        :: DZUP
-  REAL                                        :: SMCEQDEEP
-  REAL, DIMENSION(       1:NSOIL)             :: SICE
+    INTEGER                                            :: K
+    INTEGER                                            :: K1
+    INTEGER                                            :: IWTD
+    INTEGER                                            :: KWTD
+    REAL(kind=kind_noahmp)                             :: MAXWATUP, MAXWATDW ,WTDOLD
+    REAL(kind=kind_noahmp)                             :: WGPMID
+    REAL(kind=kind_noahmp)                             :: SYIELDDW
+    REAL(kind=kind_noahmp)                             :: DZUP
+    REAL(kind=kind_noahmp)                             :: SMCEQDEEP
+    REAL(kind=kind_noahmp), DIMENSION( 1:NSOIL)        :: SICE
 ! -------------------------------------------------------------
-
-
 
   QSPRING=0.
 
@@ -424,7 +450,6 @@ iwtd=1
 
 !case 1: totwater > 0 (water table going up):
 IF(totwater.gt.0.)then
-
 
          if(wtd.ge.zsoil(nsoil))then
 
@@ -566,7 +591,6 @@ IF(totwater.gt.0.)then
 !case 2: totwater < 0 (water table going down):
 ELSEIF(totwater.lt.0.)then
 
-
          if(wtd.ge.zsoil(nsoil))then !wtd in the resolved layers
 
             do k=nsoil-1,1,-1
@@ -632,12 +656,10 @@ ELSEIF(totwater.lt.0.)then
 
                 endif
 
-
-
         elseif(wtd.ge.zsoil(nsoil)-dzs(nsoil))then
 
 !if wtd was already below the bottom of the resolved soil crust
-            !gmmequilibrium soil moisture content
+!gmmequilibrium soil moisture content
                smceqdeep = smcmax * ( psisat / &
                            (psisat - dzs(nsoil)) ) ** (1./bexp)
 !               smceqdeep = max(smceqdeep,smcwlt)
@@ -688,4 +710,4 @@ ENDIF
 
 ! ----------------------------------------------------------------------
 
-END MODULE GroundWaterMmfMod
+end module GroundWaterMmfMod
